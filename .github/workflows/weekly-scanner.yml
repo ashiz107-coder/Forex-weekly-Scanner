@@ -4,7 +4,8 @@ name: Weekly Forex Scanner
 on:
   workflow_dispatch:
   schedule:
-    - cron: '0 21 * * 6'
+    - cron: '0 23 * * 5'
+    - cron: '0 0 * * 6'
 
 permissions:
   contents: read
