@@ -4,8 +4,8 @@ name: Weekly Forex Scanner
 on:
   workflow_dispatch:
   schedule:
-    - cron: '0 23 * * 5'
     - cron: '0 0 * * 6'
+    - cron: '0 1 * * 6'
 
 permissions:
   contents: read
@@ -14,18 +14,29 @@ jobs:
   weekly-scan:
     runs-on: ubuntu-latest
     steps:
+      - name: Check Sydney time
+        id: timecheck
+        run: |
+          if [ "$(TZ=Australia/Sydney date +'%u %H:%M')" = "6 11:00" ]; then
+            echo "run_scan=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "run_scan=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Download scanner code
+        if: steps.timecheck.outputs.run_scan == 'true' || github.event_name == 'workflow_dispatch'
         uses: actions/checkout@v4
 
       - name: Set up Python
+        if: steps.timecheck.outputs.run_scan == 'true' || github.event_name == 'workflow_dispatch'
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
       - name: Run weekly scanner
+        if: steps.timecheck.outputs.run_scan == 'true' || github.event_name == 'workflow_dispatch'
         env:
           MARKET_DATA_API_KEY: ${{ secrets.MARKET_DATA_API_KEY }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: python scanner.py
-  
