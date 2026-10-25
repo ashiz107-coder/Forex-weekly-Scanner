@@ -1,209 +1,267 @@
-"""Forex bullish reversal candidate scanner; manual TradingView confirmation required."""
+"""Candidate-only FX bullish reversal scanner. Not trading advice or orders."""
+from __future__ import annotations
 import argparse
 import json
+import math
 import os
+import statistics
+import sys
 import time
 import urllib.parse
 import urllib.request
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
-PAIRS = 'GBPJPY USDJPY EURJPY CHFJPY AUDJPY CADJPY NZDJPY AUDUSD GBPUSD EURUSD NZDUSD GBPAUD EURAUD GBPNZD EURNZD AUDNZD EURCAD AUDCAD GBPCAD USDCAD NZDCAD USDCHF GBPCHF EURCHF AUDCHF EURGBP'.split()
-SYDNEY = ZoneInfo('Australia/Sydney')
-API_KEY = os.getenv('MARKET_DATA_API_KEY') or os.getenv('TWELVE_DATA_API_KEY', '')
-TELEGRAM_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN', '')
-TELEGRAM_CHAT = os.getenv('TELEGRAM_CHAT_ID', '')
-INTERVALS = {'W1': '1week', 'D1': '1day', 'H4': '4h'}
+PAIRS = "GBPJPY USDJPY EURJPY CHFJPY AUDJPY CADJPY NZDJPY AUDUSD GBPUSD EURUSD NZDUSD GBPAUD EURAUD GBPNZD EURNZD AUDNZD EURCAD AUDCAD GBPCAD USDCAD NZDCAD USDCHF GBPCHF EURCHF AUDCHF EURGBP".split()
+SYDNEY = ZoneInfo("Australia/Sydney")
+INTERVALS = {"W1": "1week", "D1": "1day", "H4": "4h"}
+# These are transparent initial heuristics, not claims of perfect chart interpretation.
+SUPPORT_ATR_MULTIPLIER = 0.65
+MIN_SWING_PROMINENCE_ATR = 0.12
+REQUEST_PAUSE_SECONDS = float(os.getenv("REQUEST_PAUSE_SECONDS", "9"))
 
 
-def request_json(url, data=None):
-    body = None if data is None else urllib.parse.urlencode(data).encode()
-    req = urllib.request.Request(url, data=body, headers={'User-Agent': 'ForexScanner/3.0'})
-    with urllib.request.urlopen(req, timeout=30) as response:
+def request_json(url, params):
+    full = url + "?" + urllib.parse.urlencode(params)
+    req = urllib.request.Request(full, headers={"User-Agent": "forex-candidate-scanner/2"})
+    with urllib.request.urlopen(req, timeout=35) as response:
         return json.load(response)
 
 
-def is_closed(candle, interval, now_utc):
-    start = datetime.fromisoformat(candle['datetime'].replace('Z', '+00:00'))
-    if start.tzinfo is None:
-        start = start.replace(tzinfo=timezone.utc)
-    start = start.astimezone(timezone.utc)
-    if interval == '4h':
-        return start + timedelta(hours=4) <= now_utc
-    if interval == '1day':
-        return start + timedelta(days=1) <= now_utc
-    if interval == '1week':
-        # Provider weekly timestamps are generally anchored to the start of its week.
-        return start + timedelta(days=7) <= now_utc
-    return False
-
-
-def candles(pair, interval):
-    params = urllib.parse.urlencode({'symbol': pair[:3] + '/' + pair[3:], 'interval': interval,
-                                     'outputsize': 120, 'timezone': 'UTC', 'apikey': API_KEY, 'format': 'JSON'})
-    payload = request_json('https://api.twelvedata.com/time_series?' + params)
-    if 'values' not in payload:
-        raise RuntimeError(str(payload.get('message', payload))[:200])
-    now = datetime.now(timezone.utc)
-    rows = sorted(payload['values'], key=lambda c: c['datetime'])
-    return [{k: float(c[k]) for k in ('open', 'high', 'low', 'close')}
-            for c in rows if is_closed(c, interval, now)]
-
-
-def bearish(c):
-    return c['close'] < c['open']
-
-
-def atr_value(rows):
-    spans = []
-    for i in range(max(1, len(rows) - 14), len(rows)):
-        c, prev = rows[i], rows[i - 1]
-        spans.append(max(c['high'] - c['low'], abs(c['high'] - prev['close']), abs(c['low'] - prev['close'])))
-    return sum(spans) / len(spans) if spans else 0
-
-
-def support_levels(history, atr):
-    """Historical candidates: swing lows, adjacent red/green body overlaps or closes, former resistance."""
-    levels = []
-    for i in range(2, len(history) - 2):
-        c = history[i]
-        if c['low'] <= min(history[j]['low'] for j in (i-2, i-1, i+1, i+2)):
-            levels.append(c['low'])
-        if c['high'] >= max(history[j]['high'] for j in (i-2, i-1, i+1, i+2)):
-            # Former resistance, only considered if later broken above before the setup.
-            if any(x['close'] > c['high'] + 0.05 * atr for x in history[i+1:]):
-                levels.append(c['high'])
-    for left, right in zip(history, history[1:]):
-        if bearish(left) == bearish(right):
+def get_candles(pair, tf, key):
+    # 500 H4 bars is insufficient for 12 months; request 2500 initially.
+    size = {"W1": 100, "D1": 450, "H4": 2500}[tf]
+    payload = request_json("https://api.twelvedata.com/time_series", {
+        "symbol": pair[:3] + "/" + pair[3:], "interval": INTERVALS[tf],
+        "outputsize": size, "apikey": key, "timezone": "UTC", "format": "JSON",
+    })
+    if payload.get("status") == "error" or not isinstance(payload.get("values"), list):
+        raise RuntimeError(str(payload.get("message", "No candle data")))
+    candles = []
+    for v in payload["values"]:
+        try:
+            dt = datetime.fromisoformat(v["datetime"].replace("Z", "+00:00"))
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            candles.append({"t": dt, "o": float(v["open"]), "h": float(v["high"]),
+                            "l": float(v["low"]), "c": float(v["close"])})
+        except (ValueError, KeyError, TypeError):
             continue
-        if abs(left['close'] - right['close']) <= 0.22 * atr:
-            levels.append((left['close'] + right['close']) / 2)
-        lo = max(min(left['open'], left['close']), min(right['open'], right['close']))
-        hi = min(max(left['open'], left['close']), max(right['open'], right['close']))
-        shorter = min(abs(left['close'] - left['open']), abs(right['close'] - right['open']))
-        if shorter > 0 and hi - lo >= 0.5 * shorter:
-            levels.append((lo + hi) / 2)
-    return levels
+    candles.sort(key=lambda x: x["t"])
+    # Conservative bar closure: exclude the most recent bar if its actual closure
+    # cannot be established. W1 uses Friday 22:00 UTC as a conservative cutoff.
+    now = datetime.now(timezone.utc)
+    def closed(c):
+        if tf == "H4":
+            return c["t"] + timedelta(hours=4) <= now
+        if tf == "D1":
+            return c["t"] + timedelta(days=1) <= now
+        # Weekly candles close around Friday 22:00 UTC, not seven days after
+        # the vendor's Sunday/Monday weekly opening timestamp.
+        days_to_friday = (4 - c["t"].weekday()) % 7
+        friday = (c["t"] + timedelta(days=days_to_friday)).replace(
+            hour=22, minute=0, second=0, microsecond=0)
+        return now >= friday
+    candles = [c for c in candles if closed(c)]
+    if len(candles) < 25:
+        raise RuntimeError("insufficient closed candles")
+    return candles
 
 
-def proximity(rows, atr, exclude_last=0):
-    # Compare with historical zones to the LEFT of the entire current bearish sequence.
-    history = rows[:-exclude_last] if exclude_last else rows[:-1]
-    history = history[-90:]
-    if len(history) < 15:
-        return float('inf')
-    levels = support_levels(history, atr)
-    if not levels:
-        return float('inf')
-    low = rows[-1]['low']
-    # Require a support level at or below the setup's low, allowing small wick penetration.
-    distances = [abs(low - p) / atr for p in levels if p <= low + 0.20 * atr]
-    return min(distances, default=float('inf'))
+def atr(rows):
+    trs = []
+    for p, c in zip(rows[-16:-1], rows[-15:]):
+        trs.append(max(c["h"] - c["l"], abs(c["h"] - p["c"]), abs(c["l"] - p["c"])))
+    return statistics.mean(trs) if trs else 0.0
 
 
-def bearish_inefficiency(rows, atr, lookback=5):
-    """Three-candle bearish FVG: first candle low above third candle high."""
-    for i in range(max(2, len(rows) - lookback), len(rows)):
-        if rows[i-2]['low'] > rows[i]['high']:
-            gap = (rows[i-2]['low'] - rows[i]['high']) / atr
-            if gap > 0:
-                yield gap
+def is_doji(c):
+    return c["h"] > c["l"] and abs(c["c"] - c["o"]) <= 0.1 * (c["h"] - c["l"])
 
 
-def pin_bar(c, atr):
-    body = abs(c['close'] - c['open'])
-    span = c['high'] - c['low']
-    if span <= 0 or atr <= 0:
-        return False
-    lower = min(c['open'], c['close']) - c['low']
-    upper = c['high'] - max(c['open'], c['close'])
-    return lower >= 0.55 * span and lower >= 2 * max(body, 0.02 * atr) and lower >= 1.5 * upper
-
-
-def classify(rows, timeframe='W1'):
-    """Heuristic screening only. Thresholds are configurable interpretations of visual rules."""
-    if len(rows) < 35:
-        return None
-    atr = atr_value(rows)
-    if atr <= 0:
-        return None
-    # Pin bar follows (not belongs to) a sequence of 1, 2 or 3 red candles.
-    if pin_bar(rows[-1], atr):
-        before = 0
-        for c in reversed(rows[:-1]):
-            if bearish(c):
-                before += 1
-            else:
-                break
-        if 1 <= before <= 3:
-            distance = proximity(rows, atr, before + 1)
-            gaps = list(bearish_inefficiency(rows, atr, before + 4))
-            if distance <= 0.55 and gaps:
-                return 'A+ Pin Bar'
-    if not bearish(rows[-1]):
-        return None
+def bearish_count(rows):
     count = 0
-    for c in reversed(rows):
-        if bearish(c):
-            count += 1
-        else:
+    for i in range(len(rows) - 1, 0, -1):
+        c, p = rows[i], rows[i - 1]
+        if c["c"] > c["o"]:
             break
-    distance = proximity(rows, atr, count)
-    gaps = list(bearish_inefficiency(rows, atr, count + 3))
-    strongest = max(gaps, default=0)
-    near = distance <= 0.55
-    at_support = distance <= 0.25
-    if count >= 3 and near and strongest >= 0.12:
-        return 'A+ Setup 1'
-    if count == 2 and near and strongest >= 0.12:
-        return 'A+ Setup 2'
-    if count == 2 and 0.25 < distance <= 1.0 and 0 < strongest < 0.12:
-        return 'B+ Setup 1'
-    if count == 1 and at_support and strongest > 0:
-        return 'B+ Setup 2'
-    if count == 2 and at_support and strongest == 0:
-        return 'C+'
+        if is_doji(c):
+            down = c["c"] < p["c"] or (c["h"] < p["h"] and c["l"] < p["l"])
+            if down:
+                count += 1
+            # Non-descending neutral doji preserves sequence without adding count.
+            elif c["c"] != c["o"]:
+                break
+        else:
+            count += 1
+    return count
+
+
+def inefficiency(rows, i):
+    return max(0.0, rows[i - 1]["l"] - rows[i]["c"])
+
+
+def pin_bar(c):
+    lower = min(c["o"], c["c"]) - c["l"]
+    upper = c["h"] - max(c["o"], c["c"])
+    body = abs(c["c"] - c["o"])
+    # Flexible visual approximation: dominant lower wick, no fixed 2x/50% rule.
+    return lower > max(body, upper) * 1.35 and lower > 0
+
+
+def support_zones(rows, cutoff, volatility):
+    """Find prior swing lows, body-overlap red/green pairs and resistance flips.
+
+    All zones are candidates only. Do not use current signal candle to construct
+    historical support. Broken zones are removed by fully closed prior candles.
+    """
+    zones = []
+    n = len(rows)
+    for i in range(2, n - 3):
+        c = rows[i]
+        # Historical swing low followed by a discernible upward response.
+        if c["l"] <= min(rows[i-1]["l"], rows[i-2]["l"]) and c["l"] < min(rows[i+1]["l"], rows[i+2]["l"]):
+            rise = max(rows[i+1]["h"], rows[i+2]["h"]) - c["l"]
+            if rise >= MIN_SWING_PROMINENCE_ATR * volatility:
+                zones.append((c["l"], min(c["o"], c["c"]), i, "swing"))
+        # Adjacent opposite-colour candles with close proximity or overlapping bodies.
+        d = rows[i+1]
+        if (c["c"]-c["o"]) * (d["c"]-d["o"]) < 0:
+            lo1, hi1 = sorted((c["o"], c["c"]))
+            lo2, hi2 = sorted((d["o"], d["c"]))
+            overlap = max(0.0, min(hi1, hi2)-max(lo1, lo2))
+            smaller = min(hi1-lo1, hi2-lo2)
+            if abs(c["c"]-d["c"]) <= 0.20*volatility or (smaller > 0 and overlap >= 0.5*smaller):
+                zones.append((min(lo1, lo2), max(hi1, hi2), i, "body"))
+        # Resistance broken upward, later potentially acting as support.
+        if i >= 3 and c["c"] > max(rows[i-1]["h"], rows[i-2]["h"]):
+            level = max(rows[i-1]["h"], rows[i-2]["h"])
+            zones.append((level - 0.08*volatility, level + 0.08*volatility, i, "flip"))
+    valid = []
+    for low, high, index, kind in zones:
+        if low > high:
+            low, high = high, low
+        if rows[index]["t"] < cutoff:
+            continue
+        # Only historical completed candles after zone formation and before signal.
+        if any(x["c"] < low for x in rows[index+2:]):
+            continue
+        valid.append((low, high, kind))
+    return valid
+
+
+def find_support(rows, tf):
+    last = rows[-1]
+    prior = rows[:-1]
+    vol = max(atr(prior), 1e-9)
+    cutoff = last["t"] - timedelta(days=365)
+    # Require approximately one year's historical coverage before trusting support.
+    if prior[0]["t"] > cutoff + timedelta(days=20):
+        raise RuntimeError("insufficient 12-month historical coverage")
+    zones = support_zones(prior, cutoff, vol)
+    if not zones:
+        return None
+    # Nearest meaningful historical support to current close, never select an
+    # arbitrary distant level to force a match.
+    def distance(z):
+        low, high, _ = z
+        return max(low-last["c"], 0, last["c"]-high)
+    nearest = min(zones, key=distance)
+    low, high, kind = nearest
+    allowance = SUPPORT_ATR_MULTIPLIER*vol + (high-low)*0.5
+    close_distance = distance(nearest)
+    normal = close_distance <= allowance
+    borderline = allowance < close_distance <= 1.35*allowance
+    # Pin bars use wick-touch support and close inside/above zone.
+    pin_touch = last["l"] <= high and last["h"] >= low and last["c"] >= low
+    return {"normal": normal, "borderline": borderline, "pin_touch": pin_touch,
+            "low": low, "high": high, "kind": kind, "vol": vol}
+
+
+def classify(rows, tf):
+    if len(rows) < 25:
+        return None
+    s = find_support(rows, tf)
+    if not s:
+        return None
+    c = rows[-1]
+    count = bearish_count(rows)
+    gap = inefficiency(rows, len(rows)-1)
+    prev_gap = inefficiency(rows, len(rows)-2)
+    # Pin-bar pattern must be on latest closed candle; preceding bearish streak
+    # must itself be at least one qualifying candle.
+    preceding_count = bearish_count(rows[:-1])
+    if s["pin_touch"] and pin_bar(c) and preceding_count >= 1 and prev_gap > 0:
+        return ("A+ Pin Bar", False)
+    if not (s["normal"] or s["borderline"]):
+        return None
+    if count == 0:
+        return None
+    review = s["borderline"]
+    if count >= 3 and gap > 0:
+        return ("A+ Setup 1", review)
+    if count == 2 and gap > 0:
+        # Preliminary quantitative strength scoring; refine against chart review.
+        strong_gap = gap >= 0.15*s["vol"]
+        if strong_gap and s["normal"]:
+            return ("A+ Setup 2", review)
+        return ("B+ Setup 1", True)
+    if gap > 0:
+        return ("B+ Setup 2", review)
+    if count == 2:
+        return ("C+", review)
     return None
 
 
-def send(message):
-    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT:
-        print('Telegram not configured; results available in Actions logs.')
+def send_telegram(token, chat_id, message):
+    if not token or not chat_id:
+        print("Telegram secrets missing; output only:", message)
         return
-    request_json('https://api.telegram.org/bot' + TELEGRAM_TOKEN + '/sendMessage',
-                 {'chat_id': TELEGRAM_CHAT, 'text': message[:4000]})
+    payload = urllib.parse.urlencode({"chat_id": chat_id, "text": message}).encode()
+    req = urllib.request.Request("https://api.telegram.org/bot" + token + "/sendMessage", data=payload)
+    with urllib.request.urlopen(req, timeout=30) as response:
+        result = json.load(response)
+    if not result.get("ok"):
+        raise RuntimeError("Telegram rejected message")
 
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--timeframes', nargs='+', choices=INTERVALS, required=True)
+    parser.add_argument("--timeframes", nargs="+", choices=INTERVALS, required=True)
     args = parser.parse_args()
-    if not API_KEY:
-        raise RuntimeError('Missing API key: configure MARKET_DATA_API_KEY or TWELVE_DATA_API_KEY GitHub secret.')
+    key = os.getenv("TWELVE_DATA_API_KEY", "")
+    if not key:
+        print("Missing TWELVE_DATA_API_KEY", file=sys.stderr)
+        return 2
     results, failures = [], []
-    jobs = [(pair, label) for pair in PAIRS for label in args.timeframes]
-    for index, (pair, label) in enumerate(jobs):
-        if index:
-            time.sleep(10)
-        try:
-            result = classify(candles(pair, INTERVALS[label]), label)
-            if result:
-                results.append(f'{pair} {label}: {result}')
-        except Exception as exc:
-            failures.append(f'{pair} {label}: {exc}')
-            print('ERROR:', failures[-1], flush=True)
-    stamp = datetime.now(SYDNEY).strftime('%d %b %Y %I:%M %p')
-    message = (f'Forex reversal scan | {stamp} Sydney\n'
-               + ('\n'.join(results) if results else 'No heuristic candidates found')
-               + f'\nChecked {len(jobs)} pair/timeframe combinations. Errors: {len(failures)}.'
-               + '\nManual TradingView confirmation required; not trade signals.')
+    for tf in args.timeframes:
+        for pair in PAIRS:
+            try:
+                rows = get_candles(pair, tf, key)
+                result = classify(rows, tf)
+                if result:
+                    grade, review = result
+                    results.append(f"{pair} | {tf} | {grade}" + (" | Manual Chart Review Required" if review else ""))
+            except Exception as exc:
+                failures.append(f"{pair} {tf}: {str(exc)[:100]}")
+            print(f"{pair} {tf}: {'FAILED' if failures and failures[-1].startswith(pair+' '+tf+':') else 'processed'}", flush=True)
+            time.sleep(REQUEST_PAUSE_SECONDS)
+    label = ", ".join(args.timeframes)
+    message = f"Forex Scanner ({label})\n" + ("\n".join(results) if results else "No qualifying setups found.")
+    token = os.getenv("TELEGRAM_BOT_TOKEN", "")
+    chat = os.getenv("TELEGRAM_CHAT_ID", "")
+    try:
+        send_telegram(token, chat, message)
+        if failures:
+            send_telegram(token, chat, "Forex Scanner â Errors / Incomplete Scan\n" + "\n".join(failures))
+    except Exception as exc:
+        print("Telegram failure:", exc, file=sys.stderr)
+        return 1
+    print(message)
     if failures:
-        message += '\nFirst errors: ' + '; '.join(failures[:3])
-    print(message, flush=True)
-    send(message)
-    if failures:
-        raise RuntimeError(f'{len(failures)} requests failed; see Actions logs.')
+        print("\n".join(failures), file=sys.stderr)
+        return 1
+    return 0
 
-
-if __name__ == '__main__':
-    main()
+if __name__ == "__main__":
+    sys.exit(main())
