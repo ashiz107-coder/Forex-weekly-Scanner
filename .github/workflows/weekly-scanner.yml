@@ -1,42 +1,78 @@
-
-name: Weekly Forex Scanner
+name: Forex Scanner
 
 on:
   workflow_dispatch:
+    inputs:
+      timeframes:
+        description: 'Manual test'
+        required: true
+        default: 'W1'
+        type: choice
+        options:
+          - W1
+          - D1
+          - H4
+          - D1 H4
   schedule:
+    - cron: '0 21 * * 0-4'
+    - cron: '0 22 * * 0-4'
+    - cron: '0 1 * * 1-5'
+    - cron: '0 2 * * 1-5'
+    - cron: '0 5 * * 1-5'
+    - cron: '0 6 * * 1-5'
+    - cron: '0 9 * * 1-5'
+    - cron: '0 10 * * 1-5'
     - cron: '0 0 * * 6'
     - cron: '0 1 * * 6'
 
 permissions:
   contents: read
 
+concurrency:
+  group: forex-scanner
+  cancel-in-progress: false
+
 jobs:
-  weekly-scan:
+  scan:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
-      - name: Check Sydney time
-        id: timecheck
+      - name: Determine scheduled scan
+        id: schedule
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          MANUAL_TIMEFRAMES: ${{ inputs.timeframes }}
         run: |
-          if [ "$(TZ=Australia/Sydney date +'%u %H:%M')" = "6 11:00" ]; then
-            echo "run_scan=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "run_scan=false" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Download scanner code
-        if: steps.timecheck.outputs.run_scan == 'true' || github.event_name == 'workflow_dispatch'
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        if: steps.timecheck.outputs.run_scan == 'true' || github.event_name == 'workflow_dispatch'
-        uses: actions/setup-python@v5
+          python - <<'PY'
+          import os
+          from datetime import datetime
+          from zoneinfo import ZoneInfo
+          now = datetime.now(ZoneInfo('Australia/Sydney'))
+          if os.environ['EVENT_NAME'] == 'workflow_dispatch':
+              frames = os.environ.get('MANUAL_TIMEFRAMES') or 'W1'
+          elif now.weekday() == 5 and now.hour == 11:
+              frames = 'W1'
+          elif now.weekday() < 5 and now.hour == 8:
+              frames = 'D1 H4'
+          elif now.weekday() < 5 and now.hour in (12, 16, 20):
+              frames = 'H4'
+          else:
+              frames = ''
+          print('Sydney time:', now.isoformat(), 'frames:', frames or 'skip')
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+              f.write(f'timeframes={frames}\n')
+          PY
+      - uses: actions/checkout@v4
+        if: steps.schedule.outputs.timeframes != ''
+      - uses: actions/setup-python@v5
+        if: steps.schedule.outputs.timeframes != ''
         with:
           python-version: '3.11'
-
-      - name: Run weekly scanner
-        if: steps.timecheck.outputs.run_scan == 'true' || github.event_name == 'workflow_dispatch'
+      - name: Run scanner
+        if: steps.schedule.outputs.timeframes != ''
         env:
           MARKET_DATA_API_KEY: ${{ secrets.TWELVE_DATA_API_KEY }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        run: python scanner.py
+          FRAMES: ${{ steps.schedule.outputs.timeframes }}
+        run: python scanner.py --timeframes $FRAMES
