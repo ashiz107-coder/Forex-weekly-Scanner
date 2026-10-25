@@ -1,0 +1,28 @@
+name: Weekly Forex Scanner
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 21 * * 6'
+
+permissions:
+  contents: read
+
+jobs:
+  weekly-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download scanner code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Run weekly scanner
+        env:
+          MARKET_DATA_API_KEY: ${{ secrets.MARKET_DATA_API_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python scanner.py
