@@ -11,7 +11,7 @@ on:
 
   # Frequent UTC trigger; Sydney-local Python gate handles daylight saving.
   schedule:
-    - cron: '3 * * * *'
+    - cron: '25 * * * *'
 
 permissions:
   contents: read
