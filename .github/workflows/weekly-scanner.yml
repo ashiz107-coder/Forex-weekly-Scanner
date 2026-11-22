@@ -43,6 +43,7 @@ jobs:
           import os
           from datetime import datetime
           from zoneinfo import ZoneInfo
+          import pandas as pd
 
           now = datetime.now(ZoneInfo('Australia/Sydney'))
           selected = ''
