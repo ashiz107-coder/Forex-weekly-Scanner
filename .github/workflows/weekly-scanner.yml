@@ -35,7 +35,7 @@ jobs:
       - name: Install dependencies
         run: |
             python -m pip install --upgrade pip
-            pip install pandas oandapyV20
+            pip install pandas requests oandapyV20
         
       - name: Choose Sydney scan window
         id: window
