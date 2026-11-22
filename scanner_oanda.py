@@ -155,7 +155,7 @@ def main():
                         pass
                     else:
                         print('\n' + pair + '\tSupport Date ' + a2_setup_df['support_date_met'].iat[0])
-                        a2_setup_pairs.append('\n' + pair + '\tSupport Date ' + a2_setup_df['support_date_met'].iat[0])
+                        a2_setup_pairs.append(pair)
 
                     print(f'a2_setup_pairs = {a2_setup_pairs}')
 
