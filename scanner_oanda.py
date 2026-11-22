@@ -119,7 +119,6 @@ def send_telegram(token, chat_id, message):
 
 def main():
     now = datetime.now().strftime('%d-%m-%Y %H-%M')
-    print(f"\n\n Starting setup scan for {now}")
 
 
     telegram_token = os.getenv("TELEGRAM_BOT_TOKEN", "")
@@ -129,6 +128,7 @@ def main():
     parser.add_argument("--timeframes")
     args = parser.parse_args() 
     
+    print(f"\n\n Starting setup scan for {now} args.timeframes ={args.timeframes} ")
     try:
         for timeframe in args.timeframes:
 
