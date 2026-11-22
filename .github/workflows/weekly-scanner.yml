@@ -5,9 +5,9 @@ on:
   workflow_dispatch:
     inputs:
       timeframes:
-        description: 'W1, D1, H4, or D1 H4'
+        description: 'W, D, H4'
         required: true
-        default: 'W1'
+        default: 'D'
 
   # Frequent UTC trigger; Sydney-local Python gate handles daylight saving.
   schedule:
