@@ -34,6 +34,9 @@ jobs:
 
       - name: Install Python dependencies
         run: python -m pip install --upgrade pip pandas
+             python -m pip install --upgrade pip oandapyV20
+             python -m pip install --upgrade pip json
+             python -m pip install --upgrade pip argparse
         
       - name: Choose Sydney scan window
         id: window
