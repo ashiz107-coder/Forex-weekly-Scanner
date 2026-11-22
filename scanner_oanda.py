@@ -125,13 +125,13 @@ def main():
     telegram_chat_id = os.getenv("TELEGRAM_CHAT_ID", "")
 
     parser = argparse.ArgumentParser()
-    parser.add_argument("--timeframes")
+    parser.add_argument("--timeframes", nargs="+")
     args = parser.parse_args() 
     
     print(f"\n\n Starting setup scan for {now} args.timeframes ={args.timeframes} ")
     try:
         for timeframe in args.timeframes:
-
+            print(f"\n\n Starting setup scan for {now} timeframe ={timeframe} ")
             a1_setup_pairs = []
             a2_setup_pairs = []
             error_pairs = []
