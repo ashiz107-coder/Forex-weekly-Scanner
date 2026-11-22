@@ -147,7 +147,8 @@ def main():
                     else:
                         a1_setup_pairs.append(pair)
 
-                    print(f'a1_setup_pairs = {a1_setup_pairs}')
+                        print(f'a1_setup_pairs = {a1_setup_pairs}')
+                        continue #Do not add the same pair for A2. 
 
                     a2_setup_df = setup_check(df, num_black_candles=2)
 
