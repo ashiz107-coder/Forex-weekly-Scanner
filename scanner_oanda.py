@@ -165,9 +165,11 @@ def main():
             if ((len(a1_setup_pairs)+len(a2_setup_pairs)) > 0):
                 message = f'{timeframe}:-' +f' \tA1 : {a1_setup_pairs} \n A2 : {a2_setup_pairs}'   
                 send_telegram(telegram_token, telegram_chat_id, message)
+                print(f'telegram sent with message {message}')
             else:
-                send_telegram(telegram_token, telegram_chat_id, f'{now}\t{timeframe} :- Errors for {error_pairs}' if len(error_pairs) > 0 else '')
-
+                message =  f'{now}\t{timeframe} :- Errors for {error_pairs}' if len(error_pairs) > 0 else ''
+                send_telegram(telegram_token, telegram_chat_id, message)
+                print(f'telegram sent with Error message {message}')
     except Exception as e:
         print(f'Exception caused.{e}')
         send_telegram(telegram_token, telegram_chat_id, "Forex Scanner Errors / Incomplete Scan\n" )
